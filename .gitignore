@@ -1,0 +1,11 @@
+.vscode
+.git
+bin/
+pkg/
+integration.code-workspace
+coverage.txt
+__debug_bin
+vscode.sh
+.output
+/go.mod
+/go.sum
