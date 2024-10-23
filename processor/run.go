@@ -21,6 +21,7 @@ type RunProcessorOptions struct {
 	Quantile    string
 	Mode        string
 	LimitMargin string
+	Owners      []string
 }
 
 type RunProcessor struct {
@@ -30,6 +31,11 @@ type RunProcessor struct {
 
 func (p *RunProcessor) Type() string {
 	return "RunProcessor"
+}
+
+type queryResult struct {
+	Variables map[string]string
+	Metrics   prometheusMetrics
 }
 
 type prometheusMetrics struct {
@@ -47,10 +53,10 @@ type calculatedMetrics struct {
 }
 
 const (
-	podCPURequest    = `quantile_over_time(%s, node_namespace_pod_container:container_cpu_usage_seconds_total:%s{pod="%s", container!=""}[1w])`
-	podCPULimit      = `max_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:%s{pod="%s", container!=""}[1w]) * %s`
-	podMemoryRequest = `quantile_over_time(%s, container_memory_working_set_bytes{pod="%s", container!=""}[1w]) / 1024 / 1024`
-	podMemoryLimit   = `(max_over_time(container_memory_working_set_bytes{pod="%s", container!=""}[1w]) / 1024 / 1024) * %s`
+	podCPURequest    = `quantile_over_time(%s, node_namespace_pod_container:container_cpu_usage_seconds_total:%s{pod=~"%s.*", owner="%s", container!=""}[1w])`
+	podCPULimit      = `max_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:%s{pod=~"%s.*", owner="%s", container!=""}[1w]) * %s`
+	podMemoryRequest = `quantile_over_time(%s, container_memory_working_set_bytes{pod=~"%s.*", owner="%s", container!=""}[1w]) / 1024 / 1024`
+	podMemoryLimit   = `(max_over_time(container_memory_working_set_bytes{pod=~"%s.*", owner="%s", container!=""}[1w]) / 1024 / 1024) * %s` //node_namespace_pod_container:container_memory_working_set_bytes
 )
 
 func newPromClient(prometheusURL string) (promClient, error) {
@@ -95,25 +101,27 @@ func queryStatistic(ctx context.Context, client promClient, query string, ts tim
 	return output, nil
 }
 
-func (o *RunProcessorOptions) queryPrometheus(ctx context.Context, client promClient, podName string) (prometheusMetrics, error) {
+func (p *RunProcessor) queryPrometheus(ctx context.Context, client promClient, podName string, owner string) (queryResult, error) {
 	now := time.Now()
 	var err error
-	output := prometheusMetrics{}
+	output := queryResult{}
 
-	output.RequestCPU, err = queryStatistic(ctx, client, fmt.Sprintf(podCPURequest, o.Quantile, o.Mode, podName), now)
+	output.Metrics.RequestCPU, err = queryStatistic(ctx, client, fmt.Sprintf(podCPURequest, p.Options.Quantile, p.Options.Mode, podName, owner), now)
 	if err != nil {
 		return output, err
 	}
-	output.LimitCPU, err = queryStatistic(ctx, client, fmt.Sprintf(podCPULimit, o.Mode, podName, o.LimitMargin), now)
+	output.Metrics.LimitCPU, err = queryStatistic(ctx, client, fmt.Sprintf(podCPULimit, p.Options.Mode, podName, owner, p.Options.LimitMargin), now)
 	if err != nil {
 		return output, err
 	}
-	output.RequestMem, err = queryStatistic(ctx, client, fmt.Sprintf(podMemoryRequest, o.Quantile, podName), now)
+	output.Metrics.RequestMem, err = queryStatistic(ctx, client, fmt.Sprintf(podMemoryRequest, p.Options.Quantile, podName, owner), now)
 	if err != nil {
 		return output, err
 	}
-	output.LimitMem, err = queryStatistic(ctx, client, fmt.Sprintf(podMemoryLimit, podName, o.LimitMargin), now)
+
+	output.Metrics.LimitMem, err = queryStatistic(ctx, client, fmt.Sprintf(podMemoryLimit, podName, owner, p.Options.LimitMargin), now)
 	if err != nil {
+
 		return output, err
 	}
 
@@ -161,23 +169,32 @@ func calculateMetrics(metrics prometheusMetrics) calculatedMetrics {
 func (p *RunProcessor) Run(podName string) {
 	ctx := context.Background()
 
-	metrics, err := p.Options.queryPrometheus(ctx, p.Client, podName)
-	if err != nil {
-		fmt.Printf("Error querying pod metrics: %v\n", err)
-		return
+	var queryResults = map[string]queryResult{}
+
+	for _, owner := range p.Options.Owners {
+
+		queryResults[owner], _ = p.queryPrometheus(ctx, p.Client, podName, owner)
+
 	}
 
-	calculated := calculateMetrics(metrics)
+	//calculated := calculateMetrics(metrics)
 
-	fmt.Printf("Pod: %s\n", podName)
-	fmt.Printf("CPU Request: %v\n", metrics.RequestCPU)
-	fmt.Printf("CPU Limit: %v\n", metrics.LimitCPU)
-	fmt.Printf("Memory Request: %v\n", metrics.RequestMem)
-	fmt.Printf("Memory Limit: %v\n", metrics.LimitMem)
-	fmt.Printf("CPU Utilization Ratio: %.2f\n", calculated.CPUUtilizationRatio)
-	fmt.Printf("Memory Utilization Ratio: %.2f\n", calculated.MemoryUtilizationRatio)
-	fmt.Printf("CPU Over-provision Ratio: %.2f\n", calculated.CPUOverProvision)
-	fmt.Printf("Memory Over-provision Ratio: %.2f\n", calculated.MemoryOverProvision)
+	for owner, metrics := range queryResults {
+		fmt.Printf("Owner: %s\n", owner)
+		fmt.Printf("Memory Limit: %v\n", metrics.Metrics.LimitMem)
+		fmt.Printf("Memory Request: %v\n", metrics.Metrics.RequestMem)
+		fmt.Printf("CPU Limit: %v\n", metrics.Metrics.LimitCPU)
+		fmt.Printf("CPU Request: %v\n", metrics.Metrics.RequestCPU)
+	}
+	// fmt.Printf("Pod: %s\n", podName)
+	// fmt.Printf("CPU Request: %v\n", metrics.RequestCPU)
+	// fmt.Printf("CPU Limit: %v\n", metrics.LimitCPU)
+	// fmt.Printf("Memory Request: %v\n", metrics.RequestMem)
+	// fmt.Printf("Memory Limit: %v\n", metrics.LimitMem)
+	// fmt.Printf("CPU Utilization Ratio: %.2f\n", calculated.CPUUtilizationRatio)
+	// fmt.Printf("Memory Utilization Ratio: %.2f\n", calculated.MemoryUtilizationRatio)
+	// fmt.Printf("CPU Over-provision Ratio: %.2f\n", calculated.CPUOverProvision)
+	// fmt.Printf("Memory Over-provision Ratio: %.2f\n", calculated.MemoryOverProvision)
 
 	fmt.Println("Timeout:", p.Options.Timeout)
 	fmt.Println("Concurrency:", p.Options.Concurrency)

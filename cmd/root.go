@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/devopsext/utils"
@@ -16,8 +17,12 @@ var APPNAME = "ADVISOR"
 
 var runProcessorOptions = processor.RunProcessorOptions{
 	Timeout:     envGet("RUN_TIMEOUT", 60).(int),
-	Concurrency: envGet("RUN_CONCURRENCY", 1).(int),
+	Concurrency: envGet("RUN_CONCURRENCY", 2).(int),
 	ThanosURL:   envGet("THANOS_URL", "").(string),
+	Quantile:    envGet("QUANTILE", "0.90").(string),
+	Mode:        envGet("MODE", "sum_irate").(string),
+	LimitMargin: envGet("LIMIT_MARGIN", "1.2").(string),
+	Owners:      strings.Split(envGet("OWNERS", []string{"abs3-rke-prod-env", "tap-rke-prod-env", "iat-rke-prod-env"}).(string), ","),
 }
 
 func envGet(s string, def interface{}) interface{} {
@@ -54,7 +59,7 @@ func Execute() {
 
 			p := processors.Find("RunProcessor")
 			if rp, ok := p.(*processor.RunProcessor); ok {
-				rp.Run("test")
+				rp.Run("metrics")
 
 			} else {
 				fmt.Println("Processor not found")
@@ -66,6 +71,7 @@ func Execute() {
 	flags.IntVarP(&runProcessorOptions.Timeout, "timeout", "t", runProcessorOptions.Timeout, "Timeout")
 	flags.IntVarP(&runProcessorOptions.Concurrency, "concurrency", "c", runProcessorOptions.Concurrency, "Concurrency")
 	flags.StringVarP(&runProcessorOptions.ThanosURL, "thanos-url", "u", runProcessorOptions.ThanosURL, "Thanos URL")
+	flags.StringSliceVar(&runProcessorOptions.Owners, "owners", runProcessorOptions.Owners, "Owners")
 
 	interceptSyscall()
 
