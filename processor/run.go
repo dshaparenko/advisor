@@ -2,7 +2,10 @@ package processor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+	"sync"
 	"time"
 
 	promapi "github.com/prometheus/client_golang/api"
@@ -35,7 +38,6 @@ func (p *RunProcessor) Type() string {
 }
 
 type queryResult struct {
-	Variables  map[string]string
 	Metrics    prometheusMetrics
 	Calculated calculatedMetrics
 }
@@ -55,10 +57,10 @@ type calculatedMetrics struct {
 }
 
 const (
-	podCPURequest    = `quantile_over_time(%s, node_namespace_pod_container:container_cpu_usage_seconds_total:%s{pod=~"%s.*", owner="%s", container!=""}[1w])`
-	podCPULimit      = `max_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:%s{pod=~"%s.*", owner="%s", container!=""}[1w]) * %s`
-	podMemoryRequest = `quantile_over_time(%s, container_memory_working_set_bytes{pod=~"%s.*", owner="%s", container!=""}[1w]) / 1024 / 1024`
-	podMemoryLimit   = `(max_over_time(container_memory_working_set_bytes{pod=~"%s.*", owner="%s", container!=""}[1w]) / 1024 / 1024) * %s` //node_namespace_pod_container:container_memory_working_set_bytes
+	podCPURequest    = `quantile_over_time(%s, node_namespace_pod_container:container_cpu_usage_seconds_total:%s{pod=~"%s.*", owner="%s", container!="", container!="POD"}[1w])`
+	podCPULimit      = `max_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:%s{pod=~"%s.*", owner="%s", container!="", container!="POD"}[1w]) * %s`
+	podMemoryRequest = `quantile_over_time(%s, container_memory_working_set_bytes{pod=~"%s.*", owner="%s", container!="", container!="POD"}[1w]) / 1024 / 1024`
+	podMemoryLimit   = `(max_over_time(container_memory_working_set_bytes{pod=~"%s.*", owner="%s", container!="", container!="POD"}[1w]) / 1024 / 1024) * %s` //node_namespace_pod_container:container_memory_working_set_bytes
 )
 
 func newPromClient(prometheusURL string) (promClient, error) {
@@ -173,26 +175,46 @@ func (p *RunProcessor) Run(podName string) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(p.Options.Timeout)*time.Second)
 	defer cancel()
 
-	var queryResults = map[string]queryResult{}
+	queryResults := make(map[string]queryResult)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	sem := make(chan struct{}, p.Options.Concurrency)
+
+	wg.Add(len(p.Options.Owners))
 
 	for _, owner := range p.Options.Owners {
-		queryResults[owner], _ = p.queryPrometheus(ctx, p.Client, podName, owner)
+
+		go func(owner string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() {
+				<-sem
+			}()
+			fmt.Println("Querying Prometheus for owner", owner)
+			result, err := p.queryPrometheus(ctx, p.Client, podName, owner)
+			if err != nil {
+				log.Printf("Error querying Prometheus for owner %s: %v", owner, err)
+				return
+			}
+			result.Calculated = calculateMetrics(result.Metrics)
+
+			mu.Lock()
+			queryResults[owner] = result
+			mu.Unlock()
+		}(owner)
 	}
 
-	for owner, metrics := range queryResults {
-		fmt.Printf("Owner: %s\n", owner)
-		fmt.Printf("Memory Limit: %v\n", metrics.Metrics.LimitMem)
-		fmt.Printf("Memory Request: %v\n", metrics.Metrics.RequestMem)
-		fmt.Printf("CPU Limit: %v\n", metrics.Metrics.LimitCPU)
-		fmt.Printf("CPU Request: %v\n", metrics.Metrics.RequestCPU)
+	wg.Wait()
 
-		result := queryResults[owner]
-		result.Calculated = calculateMetrics(metrics.Metrics)
-		fmt.Printf("\n\nCPU Utilization Ratio: %.2f\n", result.Calculated.CPUUtilizationRatio)
-		fmt.Printf("CPU Over-provision Ratio: %.2f\n", result.Calculated.CPUOverProvision)
-		fmt.Printf("Memory Utilization Ratio: %.2f\n", result.Calculated.MemoryUtilizationRatio)
-		fmt.Printf("Memory Over-provision Ratio: %.2f\n", result.Calculated.MemoryOverProvision)
+	jsonQueryResults, err := json.Marshal(queryResults)
+	if err != nil {
+		log.Printf("Error marshalling query results: %v", err)
+		return
 	}
+
+	fmt.Println(string(jsonQueryResults))
 
 	fmt.Println("Timeout:", p.Options.Timeout)
 	fmt.Println("Concurrency:", p.Options.Concurrency)
