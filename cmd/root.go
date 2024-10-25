@@ -22,7 +22,8 @@ var runProcessorOptions = processor.RunProcessorOptions{
 	Quantile:    envGet("QUANTILE", "0.90").(string),
 	Mode:        envGet("MODE", "sum_irate").(string),
 	LimitMargin: envGet("LIMIT_MARGIN", "1.2").(string),
-	Owners:      strings.Split(envGet("OWNERS", []string{"abs3-rke-prod-env", "tap-rke-prod-env", "iat-rke-prod-env"}).(string), ","),
+	Owners:      strings.Split(envGet("OWNERS", []string{"bla", "bla2"}).(string), ","),
+	PodName:     envGet("POD_NAME", "").(string),
 }
 
 func envGet(s string, def interface{}) interface{} {
@@ -59,7 +60,7 @@ func Execute() {
 
 			p := processors.Find("RunProcessor")
 			if rp, ok := p.(*processor.RunProcessor); ok {
-				rp.Run("metrics")
+				rp.Run(runProcessorOptions.PodName)
 
 			} else {
 				fmt.Println("Processor not found")
@@ -72,6 +73,10 @@ func Execute() {
 	flags.IntVarP(&runProcessorOptions.Concurrency, "concurrency", "c", runProcessorOptions.Concurrency, "Concurrency")
 	flags.StringVarP(&runProcessorOptions.ThanosURL, "thanos-url", "u", runProcessorOptions.ThanosURL, "Thanos URL")
 	flags.StringSliceVar(&runProcessorOptions.Owners, "owners", runProcessorOptions.Owners, "Owners")
+	flags.StringVarP(&runProcessorOptions.PodName, "pod-name", "p", runProcessorOptions.PodName, "Pod Name")
+	flags.StringVarP(&runProcessorOptions.Quantile, "quantile", "q", runProcessorOptions.Quantile, "Quantile")
+	flags.StringVarP(&runProcessorOptions.Mode, "mode", "m", runProcessorOptions.Mode, "Mode")
+	flags.StringVarP(&runProcessorOptions.LimitMargin, "limit-margin", "l", runProcessorOptions.LimitMargin, "Limit Margin")
 
 	interceptSyscall()
 

@@ -18,6 +18,7 @@ type RunProcessorOptions struct {
 	Timeout     int
 	Concurrency int
 	ThanosURL   string
+	PodName     string
 	Quantile    string
 	Mode        string
 	LimitMargin string
@@ -34,8 +35,9 @@ func (p *RunProcessor) Type() string {
 }
 
 type queryResult struct {
-	Variables map[string]string
-	Metrics   prometheusMetrics
+	Variables  map[string]string
+	Metrics    prometheusMetrics
+	Calculated calculatedMetrics
 }
 
 type prometheusMetrics struct {
@@ -167,17 +169,15 @@ func calculateMetrics(metrics prometheusMetrics) calculatedMetrics {
 }
 
 func (p *RunProcessor) Run(podName string) {
-	ctx := context.Background()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(p.Options.Timeout)*time.Second)
+	defer cancel()
 
 	var queryResults = map[string]queryResult{}
 
 	for _, owner := range p.Options.Owners {
-
 		queryResults[owner], _ = p.queryPrometheus(ctx, p.Client, podName, owner)
-
 	}
-
-	//calculated := calculateMetrics(metrics)
 
 	for owner, metrics := range queryResults {
 		fmt.Printf("Owner: %s\n", owner)
@@ -185,16 +185,14 @@ func (p *RunProcessor) Run(podName string) {
 		fmt.Printf("Memory Request: %v\n", metrics.Metrics.RequestMem)
 		fmt.Printf("CPU Limit: %v\n", metrics.Metrics.LimitCPU)
 		fmt.Printf("CPU Request: %v\n", metrics.Metrics.RequestCPU)
+
+		result := queryResults[owner]
+		result.Calculated = calculateMetrics(metrics.Metrics)
+		fmt.Printf("\n\nCPU Utilization Ratio: %.2f\n", result.Calculated.CPUUtilizationRatio)
+		fmt.Printf("CPU Over-provision Ratio: %.2f\n", result.Calculated.CPUOverProvision)
+		fmt.Printf("Memory Utilization Ratio: %.2f\n", result.Calculated.MemoryUtilizationRatio)
+		fmt.Printf("Memory Over-provision Ratio: %.2f\n", result.Calculated.MemoryOverProvision)
 	}
-	// fmt.Printf("Pod: %s\n", podName)
-	// fmt.Printf("CPU Request: %v\n", metrics.RequestCPU)
-	// fmt.Printf("CPU Limit: %v\n", metrics.LimitCPU)
-	// fmt.Printf("Memory Request: %v\n", metrics.RequestMem)
-	// fmt.Printf("Memory Limit: %v\n", metrics.LimitMem)
-	// fmt.Printf("CPU Utilization Ratio: %.2f\n", calculated.CPUUtilizationRatio)
-	// fmt.Printf("Memory Utilization Ratio: %.2f\n", calculated.MemoryUtilizationRatio)
-	// fmt.Printf("CPU Over-provision Ratio: %.2f\n", calculated.CPUOverProvision)
-	// fmt.Printf("Memory Over-provision Ratio: %.2f\n", calculated.MemoryOverProvision)
 
 	fmt.Println("Timeout:", p.Options.Timeout)
 	fmt.Println("Concurrency:", p.Options.Concurrency)
